@@ -9,6 +9,7 @@ function atr(k:any[],i:number,p=14){if(i<p+1)return null;let sum=0;for(let j=i-p
 Deno.serve(async(req)=>{if(req.method==="OPTIONS")return new Response("ok",{headers:cors});if(req.method!=="POST")return out({error:"POST required"},405);
 const url=Deno.env.get("SUPABASE_URL"),key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");if(!url||!key)return out({error:"Server configuration missing"},500);
 const db=createClient(url,key,{auth:{persistSession:false}});
+const bucket=new Date(Math.floor(Date.now()/1800000)*1800000).toISOString();const {data:slot,error:slotErr}=await db.from("v2_backtest_rate_limits").insert({bucket_start:bucket}).select("bucket_start").maybeSingle();if(slotErr||!slot)return out({error:"A backtest was already started in this 30-minute window. Please try again later."},429);
 let runId:string|undefined;
 try{const body=await req.json().catch(()=>({}));const symbols=Array.isArray(body.symbols)?body.symbols.slice(0,5):["BTCUSDT","ETHUSDT"];if(!symbols.length||symbols.some((s:string)=>!/^[A-Z0-9]{3,20}$/.test(s)))return out({error:"Invalid symbols"},400);
 const end=body.end_time?Date.parse(body.end_time):Date.now()-15*60*1000;const start=body.start_time?Date.parse(body.start_time):end-30*86400000;if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start||end-start>30*86400000)return out({error:"Choose a valid date range up to 30 days"},400);
