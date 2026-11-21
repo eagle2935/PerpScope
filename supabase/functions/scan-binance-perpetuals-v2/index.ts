@@ -24,7 +24,7 @@ function evaluate(x:any){
  if(momentum){score+=15;reasons.push("5M momentum confirms direction");}else return {side:"WATCH",score,reasons:["5M momentum is not in confirmation range"],filters};
  const candle15=s15.k.at(-1),prior15=s15.k.at(-2);
  const pullback=long?(+candle15[3]<=s15.e20*1.003&&+candle15[4]>s15.e20&&+candle15[4]>+candle15[1]&&+candle15[4]>+prior15[2]):(+candle15[2]>=s15.e20*0.997&&+candle15[4]<s15.e20&&+candle15[4]<+candle15[1]&&+candle15[4]<+prior15[3]);
- if(pullback){score+=30;reasons.push("15M EMA20 pullback and confirmation candle");}else return {side:"WATCH",score,reasons:["No confirmed 15M pullback/retest"],filters};
+ if(pullback){score+=25;reasons.push("15M EMA20 pullback and confirmation candle");}else return {side:"WATCH",score,reasons:["No confirmed 15M pullback/retest"],filters};
  if(book&&book.spreadBps<=8&&((long&&book.imbalance>=0.05)||(!long&&book.imbalance<=-0.05))){score+=10;reasons.push("Order-book imbalance and spread confirm");filters.orderbook=true;}else return {side:"WATCH",score,reasons:["Order-book confirmation or spread filter failed"],filters};
  if(taker!==null&&((long&&taker>=1.02)||(!long&&taker<=0.98))){score+=10;reasons.push("Taker flow confirms direction");filters.taker=true;}else return {side:"WATCH",score,reasons:["Taker flow does not confirm"],filters};
  if(oiChange!==null&&oiChange>=0.10){score+=10;reasons.push("Open interest increasing with directional move");filters.open_interest=true;}else return {side:"WATCH",score,reasons:["Open-interest confirmation unavailable or weak"],filters};
