@@ -162,6 +162,9 @@ Deno.serve(async(req)=>{
   const url=Deno.env.get("SUPABASE_URL"),key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if(!url||!key)return json({error:"Server configuration missing"},500);
   const supabase=createClient(url,key,{auth:{persistSession:false}});
+  const cutoff=new Date(Date.now()-120000).toISOString();
+  const {data:activeRun}=await supabase.from("scan_runs").select("id").eq("status","running").gte("started_at",cutoff).limit(1).maybeSingle();
+  if(activeRun)return json({ok:true,skipped:true,reason:"Previous V1 scan is still running",active_scan_id:activeRun.id},202);
   const {data:run,error:runErr}=await supabase.from("scan_runs").insert({status:"running"}).select("id").single();
   if(runErr||!run)return json({error:"Could not start scan",detail:runErr?.message},500);
   try {
@@ -191,7 +194,7 @@ Deno.serve(async(req)=>{
       }
     }
     // Detailed requests are intentionally limited to the 20 highest-volume contracts to respect Binance public API rate limits.
-    const detailed=selected.slice(0,20);
+    const detailed=selected.slice(0,40);
     for(let i=0;i<detailed.length;i+=8){
       const batch=detailed.slice(i,i+8);
       const result=await Promise.all(batch.map(async(t:any)=>{
