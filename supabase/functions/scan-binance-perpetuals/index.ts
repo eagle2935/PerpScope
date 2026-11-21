@@ -168,6 +168,8 @@ Deno.serve(async(req)=>{
   const {data:run,error:runErr}=await supabase.from("scan_runs").insert({status:"running"}).select("id").single();
   if(runErr||!run)return json({error:"Could not start scan",detail:runErr?.message},500);
   try {
+    // Check exits before the slower market-wide scan so paper trades are updated first.
+    const paperTradeUpdates = await updateOpenPaperTrades(supabase);
     const [exchangeInfo,tickers,premiums]=await Promise.all([
       get("/fapi/v1/exchangeInfo"),get("/fapi/v1/ticker/24hr"),get("/fapi/v1/premiumIndex")
     ]);
@@ -255,7 +257,6 @@ Deno.serve(async(req)=>{
     ]);
     if(snapRes.error)throw snapRes.error;if(candRes.error)throw candRes.error;if(analysisRes.error)throw analysisRes.error;
     const paperTradesCreated = await createPaperTrades(supabase, run.id);
-    const paperTradeUpdates = await updateOpenPaperTrades(supabase);
     await supabase.from("scan_runs").update({status:"completed",completed_at:new Date().toISOString(),symbols_scanned:rows.length}).eq("id",run.id);
     return json({ok:true,scan_id:run.id,symbols_scanned:rows.length,detailed_analyses:analyses.length,validated_setups:candidates.filter(x=>x.side!=="WATCH").length,paper_trades_created:paperTradesCreated,paper_trades_checked:paperTradeUpdates.checked,paper_trades_completed:paperTradeUpdates.completed,liquidations:"Not stored by the scanner; public all-market WebSocket is shown live in dashboard while open.",note:"Paper trades are tracked from generated LONG/SHORT signals only. WATCH rows are excluded. A 1m candle touching both TP and SL is conservatively counted as a LOSS. No real orders are placed."});
   }catch(error){
