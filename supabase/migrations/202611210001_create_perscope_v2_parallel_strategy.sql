@@ -10,10 +10,15 @@ CREATE INDEX IF NOT EXISTS idx_v2_paper_status_time ON public.v2_paper_trades(st
 CREATE INDEX IF NOT EXISTS idx_v2_paper_symbol ON public.v2_paper_trades(symbol,signal_created_at);
 CREATE INDEX IF NOT EXISTS idx_v2_backtest_trades_run ON public.v2_backtest_trades(backtest_id,entry_time);
 ALTER TABLE public.v2_scan_runs ENABLE ROW LEVEL SECURITY; ALTER TABLE public.v2_trade_candidates ENABLE ROW LEVEL SECURITY; ALTER TABLE public.v2_paper_trades ENABLE ROW LEVEL SECURITY; ALTER TABLE public.v2_backtest_runs ENABLE ROW LEVEL SECURITY; ALTER TABLE public.v2_backtest_trades ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Public read V2 scan runs" ON public.v2_scan_runs;
 CREATE POLICY "Public read V2 scan runs" ON public.v2_scan_runs FOR SELECT TO anon,authenticated USING(true);
+DROP POLICY IF EXISTS "Public read V2 candidates" ON public.v2_trade_candidates;
 CREATE POLICY "Public read V2 candidates" ON public.v2_trade_candidates FOR SELECT TO anon,authenticated USING(true);
+DROP POLICY IF EXISTS "Public read V2 paper trades" ON public.v2_paper_trades;
 CREATE POLICY "Public read V2 paper trades" ON public.v2_paper_trades FOR SELECT TO anon,authenticated USING(true);
+DROP POLICY IF EXISTS "Public read V2 backtest runs" ON public.v2_backtest_runs;
 CREATE POLICY "Public read V2 backtest runs" ON public.v2_backtest_runs FOR SELECT TO anon,authenticated USING(true);
+DROP POLICY IF EXISTS "Public read V2 backtest trades" ON public.v2_backtest_trades;
 CREATE POLICY "Public read V2 backtest trades" ON public.v2_backtest_trades FOR SELECT TO anon,authenticated USING(true);
 REVOKE INSERT,UPDATE,DELETE ON public.v2_scan_runs,public.v2_trade_candidates,public.v2_paper_trades,public.v2_backtest_runs,public.v2_backtest_trades FROM anon,authenticated;
 GRANT SELECT ON public.v2_scan_runs,public.v2_trade_candidates,public.v2_paper_trades,public.v2_backtest_runs,public.v2_backtest_trades TO anon,authenticated;
