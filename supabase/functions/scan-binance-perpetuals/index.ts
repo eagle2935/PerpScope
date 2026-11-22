@@ -269,8 +269,16 @@ Deno.serve(async(req)=>{
         if((alignment==="BULLISH"&&longTaker)||(alignment==="BEARISH"&&shortTaker)){score+=10;reasons.push("Taker flow confirms direction");}
         if(oiConfirmed){score+=10;reasons.push("Open interest increasing");}
         if(Number(t.quoteVolume)>=10_000_000){score+=5;reasons.push("High liquidity");}
-        if(alignment==="BULLISH"&&momentumLong&&longBook&&longTaker&&oiConfirmed){setup=riskSetup("LONG",price,atr15);if(setup){side="LONG";score+=10;reasons.push("Risk model: 2R target and ATR stop validated");}}
-        if(alignment==="BEARISH"&&momentumShort&&shortBook&&shortTaker&&oiShortConfirmed){setup=riskSetup("SHORT",price,atr15);if(setup){side="SHORT";score+=10;reasons.push("Risk model: 2R target and ATR stop validated");}}
+        if (alignment==="BULLISH" && momentumLong && pullbackLong && longBook && longTaker && oiConfirmed && spreadConfirmed && dataComplete) {
+          setup = riskSetup("LONG", price, atr15);
+          if (setup) { side="LONG"; score+=10; reasons.push("15m pullback, liquidity and 1:3 risk model validated"); }
+        }
+        if (alignment==="BEARISH" && momentumShort && pullbackShort && shortBook && shortTaker && oiShortConfirmed && spreadConfirmed && dataComplete) {
+          setup = riskSetup("SHORT", price, atr15);
+          if (setup) { side="SHORT"; score+=10; reasons.push("15m pullback, liquidity and 1:3 risk model validated"); }
+        }
+        if (!dataComplete) reasons.push("Required market data incomplete");
+        if (!spreadConfirmed) reasons.push("Spread filter failed or unavailable");
         const quality=dataComplete?"complete":"partial";
         const analysis={scan_id:run.id,symbol, timeframe_data:tf,orderbook_imbalance:book?.imbalance??null,orderbook_bid_usd:book?.bidUsd??null,orderbook_ask_usd:book?.askUsd??null,spread_bps:book?.spreadBps??null,open_interest_usd:oiNew,open_interest_change_pct:oiChange,taker_buy_sell_ratio:takerRatio,liquidation_buy_usd:null,liquidation_sell_usd:null,liquidation_source:"live_public_websocket_in_dashboard_only",data_quality:quality,trend_alignment:alignment,signal_side:side,signal_score:score,risk_reward:setup?.rr??null,entry_price:setup?.entry??null,stop_loss:setup?.stop??null,take_profit:setup?.target??null,reasons};
         return {analysis,candidate:{scan_id:run.id,symbol,side,score,entry_price:setup?.entry??price,take_profit:setup?.target??null,stop_loss:setup?.stop??null,reasons,risk_reward:setup?.rr??null,confidence_label:score>=85?"HIGH":score>=70?"MEDIUM":"LOW",validation_status:side==="WATCH"?"WATCH_ONLY":"RISK_CHECKED_NOT_EXECUTED"}};
@@ -279,7 +287,7 @@ Deno.serve(async(req)=>{
     }
     // Keep the watchlist complete: all 80 markets get a WATCH row; replace the top 20 with their validated results.
     const bySymbol=new Map(candidates.map(x=>[x.symbol,x]));
-    for(const row of rows){if(!bySymbol.has(row.symbol))candidates.push({scan_id:run.id,symbol:row.symbol,side:"WATCH",score:0,entry_price:Number(row.last_price),take_profit:null,stop_loss:null,reasons:["Detailed analysis not run: outside top 20 by quote volume"],risk_reward:null,confidence_label:"LOW",validation_status:"WATCH_ONLY"});}
+    for(const row of rows){if(!bySymbol.has(row.symbol))candidates.push({scan_id:run.id,symbol:row.symbol,side:"WATCH",score:0,entry_price:Number(row.last_price),take_profit:null,stop_loss:null,reasons:["Detailed analysis not run: outside top 40 by quote volume"],risk_reward:null,confidence_label:"LOW",validation_status:"WATCH_ONLY"});}
     const [snapRes,candRes,analysisRes]=await Promise.all([
       supabase.from("market_snapshots").insert(rows),
       supabase.from("trade_candidates").insert(candidates),
