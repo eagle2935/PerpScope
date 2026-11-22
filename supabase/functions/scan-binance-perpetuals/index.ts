@@ -203,12 +203,12 @@ Deno.serve(async(req)=>{
     const premiumMap=new Map(premiums.map((p:any)=>[p.symbol,p]));
     const selected=tickers.filter((t:any)=>active.has(t.symbol)&&Number(t.quoteVolume)>1_000_000).sort((a:any,b:any)=>Number(b.quoteVolume)-Number(a.quoteVolume)).slice(0,80);
     const rows:any[]=[],candidates:any[]=[],analyses:any[]=[];
-    // Base market coverage for all 80 symbols; detailed technical and depth analysis for the 40 most liquid.
+    // Base market coverage for all 80 symbols; detailed technical and depth analysis for the 20 most liquid.
     for(let i=0;i<selected.length;i+=16){
       const batch=selected.slice(i,i+16);
       const enriched=await Promise.all(batch.map(async(t:any)=>{
         const p:any=premiumMap.get(t.symbol);
-        const oiNow=await optional("/fapi/v1/openInterest?symbol="+t.symbol);
+        const oiNow=selected.indexOf(t)<20 ? await optional("/fapi/v1/openInterest?symbol="+t.symbol) : null;
         const oi=oiNow?Number(oiNow.openInterest):null;
         return {t,p,oi,ratio:null};
       }));
@@ -218,9 +218,9 @@ Deno.serve(async(req)=>{
       }
     }
     // Detailed requests are intentionally limited to the 40 highest-volume contracts with bounded concurrency.
-    const detailed=selected.slice(0,40);
-    for(let i=0;i<detailed.length;i+=8){
-      const batch=detailed.slice(i,i+8);
+    const detailed=selected.slice(0,20);
+    for(let i=0;i<detailed.length;i+=10){
+      const batch=detailed.slice(i,i+10);
       const result=await Promise.all(batch.map(async(t:any)=>{
         const symbol=t.symbol;
         const paths=[
@@ -283,7 +283,7 @@ Deno.serve(async(req)=>{
     }
     // Keep the watchlist complete: all 80 markets get a WATCH row; replace the top 20 with their validated results.
     const bySymbol=new Map(candidates.map(x=>[x.symbol,x]));
-    for(const row of rows){if(!bySymbol.has(row.symbol))candidates.push({scan_id:run.id,symbol:row.symbol,side:"WATCH",score:0,entry_price:Number(row.last_price),take_profit:null,stop_loss:null,reasons:["Detailed analysis not run: outside top 40 by quote volume"],risk_reward:null,confidence_label:"LOW",validation_status:"WATCH_ONLY"});}
+    for(const row of rows){if(!bySymbol.has(row.symbol))candidates.push({scan_id:run.id,symbol:row.symbol,side:"WATCH",score:0,entry_price:Number(row.last_price),take_profit:null,stop_loss:null,reasons:["Detailed analysis not run: outside top 20 by quote volume"],risk_reward:null,confidence_label:"LOW",validation_status:"WATCH_ONLY"});}
     const [snapRes,candRes,analysisRes]=await Promise.all([
       supabase.from("market_snapshots").insert(rows),
       supabase.from("trade_candidates").insert(candidates),
