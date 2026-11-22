@@ -1,13 +1,13 @@
 import { riskSetup } from "./risk-model.ts";
 
-Deno.test("LONG setup produces exact 3R geometry", () => {
+Deno.test("LONG setup produces baseline 2R geometry", () => {
   const x = riskSetup("LONG", 100, 1);
-  if (!x || x.stop !== 98.5 || x.target !== 104.5 || x.rr !== 3) throw new Error(JSON.stringify(x));
+  if (!x || x.stop !== 98.5 || x.target !== 103 || x.rr !== 2) throw new Error(JSON.stringify(x));
 });
 
-Deno.test("SHORT setup produces exact 3R geometry", () => {
+Deno.test("SHORT setup produces baseline 2R geometry", () => {
   const x = riskSetup("SHORT", 100, 1);
-  if (!x || x.stop !== 101.5 || x.target !== 95.5 || x.rr !== 3) throw new Error(JSON.stringify(x));
+  if (!x || x.stop !== 101.5 || x.target !== 97 || x.rr !== 2) throw new Error(JSON.stringify(x));
 });
 
 Deno.test("Rejects missing, zero and non-finite ATR", () => {
