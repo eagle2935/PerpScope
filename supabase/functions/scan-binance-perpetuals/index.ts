@@ -107,7 +107,7 @@ async function createPaperTrades(supabase: any, scanId: string) {
     const entry = Number(c.entry_price), stop = Number(c.stop_loss), target = Number(c.take_profit);
     const rr = Math.abs(target - entry) / Math.abs(entry - stop);
     return Number.isFinite(entry) && entry > 0 && Number.isFinite(stop) && stop > 0
-      && Number.isFinite(target) && Number.isFinite(rr) && Math.abs(rr - 3) <= 0.01
+      && Number.isFinite(target) && Number.isFinite(rr) && Math.abs(rr - 2) <= 0.01
       && (c.side === "LONG" ? stop < entry && target > entry : stop > entry && target < entry);
   }).map((c: any) => ({
     source_candidate_id: c.id, scan_id: c.scan_id, symbol: c.symbol, side: c.side,
@@ -161,7 +161,7 @@ async function updateOpenPaperTrades(supabase: any) {
             exit_at: new Date(closeTime).toISOString(),
             exit_reason: both ? "BOTH_HIT_SAME_CANDLE" : win ? "TAKE_PROFIT" : "STOP_LOSS",
             realized_r: win ? Number(trade.risk_reward ?? 2) : -1,
-            simulated_pnl_usd: Number(((win ? Number(trade.risk_reward ?? 3) : -1) * Number(trade.simulated_risk_usd ?? 2)).toFixed(2)),
+            simulated_pnl_usd: Number(((win ? Number(trade.risk_reward ?? 2) : -1) * Number(trade.simulated_risk_usd ?? 2)).toFixed(2)),
             duration_seconds: Math.max(0, Math.floor((closeTime - new Date(trade.signal_created_at).getTime()) / 1000)),
             last_checked_at: new Date(closeTime).toISOString(), updated_at: new Date().toISOString(),
           };
@@ -267,11 +267,11 @@ Deno.serve(async(req)=>{
         if(Number(t.quoteVolume)>=10_000_000){score+=5;reasons.push("High liquidity");}
         if (alignment==="BULLISH" && momentumLong && pullbackLong && longBook && longTaker && oiConfirmed && spreadConfirmed && dataComplete) {
           setup = riskSetup("LONG", price, atr15);
-          if (setup) { side="LONG"; score+=10; reasons.push("15m pullback, liquidity and 1:3 risk model validated"); }
+          if (setup) { side="LONG"; score+=10; reasons.push("15m pullback, liquidity and baseline 1:2 risk model validated"); }
         }
         if (alignment==="BEARISH" && momentumShort && pullbackShort && shortBook && shortTaker && oiShortConfirmed && spreadConfirmed && dataComplete) {
           setup = riskSetup("SHORT", price, atr15);
-          if (setup) { side="SHORT"; score+=10; reasons.push("15m pullback, liquidity and 1:3 risk model validated"); }
+          if (setup) { side="SHORT"; score+=10; reasons.push("15m pullback, liquidity and baseline 1:2 risk model validated"); }
         }
         if (!dataComplete) reasons.push("Required market data incomplete");
         if (!spreadConfirmed) reasons.push("Spread filter failed or unavailable");
