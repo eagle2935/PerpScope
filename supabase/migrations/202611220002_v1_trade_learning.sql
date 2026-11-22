@@ -57,18 +57,17 @@ set search_path = pg_catalog, public, private
 as $$
 declare
   candidate_reasons jsonb := '[]'::jsonb;
-  analysis_row record;
-  snapshot_row record;
+  feature_row record;
   derived_setup text;
 begin
   if tg_op = 'INSERT' then
-    select coalesce(tc.reasons, '[]'::jsonb),
+    select coalesce(tc.reasons, '[]'::jsonb) as reasons,
            ma.timeframe_data, ma.trend_alignment, ma.orderbook_imbalance,
            ma.spread_bps, ma.open_interest_usd, ma.open_interest_change_pct,
            ma.taker_buy_sell_ratio, ma.data_quality, ma.signal_score,
            ms.funding_rate, ms.quote_volume, ms.open_interest,
            ms.long_short_ratio, ms.price_change_pct
-      into candidate_reasons, analysis_row
+      into feature_row
     from public.trade_candidates tc
     left join public.market_analysis ma
       on ma.scan_id = new.scan_id and ma.symbol = new.symbol
@@ -76,6 +75,7 @@ begin
       on ms.scan_id = new.scan_id and ms.symbol = new.symbol
     where tc.id = new.source_candidate_id;
 
+    candidate_reasons := coalesce(feature_row.reasons, '[]'::jsonb);
     derived_setup := case
       when candidate_reasons::text ilike '%pullback%' then 'trend_pullback'
       when candidate_reasons::text ilike '%momentum%' then 'trend_momentum'
@@ -91,23 +91,23 @@ begin
       simulated_pnl_usd, duration_seconds, outcome_updated_at
     ) values (
       new.id, new.source_candidate_id, new.scan_id, new.symbol, new.side,
-      derived_setup, '5m', analysis_row.trend_alignment, new.score,
+      derived_setup, '5m', feature_row.trend_alignment, new.score,
       new.confidence_label, new.entry_price, new.stop_loss, new.take_profit,
       new.risk_reward,
       jsonb_build_object(
-        'timeframe_data', coalesce(analysis_row.timeframe_data, '{}'::jsonb),
-        'orderbook_imbalance', analysis_row.orderbook_imbalance,
-        'spread_bps', analysis_row.spread_bps,
-        'open_interest_usd', analysis_row.open_interest_usd,
-        'open_interest_change_pct', analysis_row.open_interest_change_pct,
-        'taker_buy_sell_ratio', analysis_row.taker_buy_sell_ratio,
-        'data_quality', analysis_row.data_quality,
-        'analysis_score', analysis_row.signal_score,
-        'funding_rate', analysis_row.funding_rate,
-        'quote_volume', analysis_row.quote_volume,
-        'open_interest', analysis_row.open_interest,
-        'long_short_ratio', analysis_row.long_short_ratio,
-        'price_change_pct', analysis_row.price_change_pct
+        'timeframe_data', coalesce(feature_row.timeframe_data, '{}'::jsonb),
+        'orderbook_imbalance', feature_row.orderbook_imbalance,
+        'spread_bps', feature_row.spread_bps,
+        'open_interest_usd', feature_row.open_interest_usd,
+        'open_interest_change_pct', feature_row.open_interest_change_pct,
+        'taker_buy_sell_ratio', feature_row.taker_buy_sell_ratio,
+        'data_quality', feature_row.data_quality,
+        'analysis_score', feature_row.signal_score,
+        'funding_rate', feature_row.funding_rate,
+        'quote_volume', feature_row.quote_volume,
+        'open_interest', feature_row.open_interest,
+        'long_short_ratio', feature_row.long_short_ratio,
+        'price_change_pct', feature_row.price_change_pct
       ),
       candidate_reasons, new.signal_created_at,
       new.status, new.exit_price, new.exit_at, new.exit_reason,
