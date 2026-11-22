@@ -199,7 +199,7 @@ select
   round(100.0 * count(*) filter (where outcome_status = 'WIN') / nullif(count(*),0), 2) as win_rate_pct,
   round(avg(realized_r), 4) as average_realized_r,
   round(sum(realized_r), 4) as net_realized_r,
-  round(sum(simulated_pnl_usd), 2) as net_simulated_pnl_usd,
+  round(sum(simulated_pnl_usd), 2) as gross_simulated_pnl_usd,
   round(avg(duration_seconds))::bigint as average_duration_seconds,
   round(
     sum(realized_r) filter (where realized_r > 0)
