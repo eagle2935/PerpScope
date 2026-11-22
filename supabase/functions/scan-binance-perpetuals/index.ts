@@ -50,11 +50,37 @@ function indicators(raw: any[]) {
   return {close:last,ema20:e20,ema50:e50,rsi14:rsi(closes),macd:macdLine,macd_signal:signal,macd_histogram:hist,atr14:atr(closed),trend,candles:closed.length};
 }
 async function get(path:string) {
-  const res=await fetch(BASE+path,{headers:{Accept:"application/json"}});
-  if(!res.ok)throw new Error("Binance "+res.status+" "+path);
-  return await res.json();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(BASE + path, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (res.status === 429 || res.status >= 500) {
+        const retryAfter = Number(res.headers.get("Retry-After") || 0);
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, Math.min(2500, retryAfter * 1000 || 250 * (2 ** attempt))));
+          continue;
+        }
+      }
+      if (!res.ok) throw new Error("Binance " + res.status + " " + path);
+      return await res.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 200 * (2 ** attempt)));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Binance request failed: " + path);
 }
-async function optional(path:string) { try{return await get(path);}catch{return null;} }
+async function optional(path:string) {
+  try { return await get(path); }
+  catch (error) { console.warn("Optional Binance data unavailable", path, error); return null; }
+}
 function orderbook(depth:any) {
   if(!depth?.bids?.length||!depth?.asks?.length)return null;
   const bid=depth.bids.reduce((s:any,x:any)=>s+Number(x[0])*Number(x[1]),0);
@@ -63,12 +89,16 @@ function orderbook(depth:any) {
   return {bidUsd:bid,askUsd:ask,imbalance:(bid-ask)/(bid+ask),spreadBps:mid>0?(bestAsk-bestBid)/mid*10000:null};
 }
 function riskSetup(side:string,price:number,atr15:number|null) {
-  if(!atr15||atr15<=0)return null;
-  const distance=atr15*1.5, pct=distance/price*100;
-  if(pct<0.25||pct>3.0)return null;
-  const stop=side==="LONG"?price-distance:price+distance;
-  const target=side==="LONG"?price+distance*2:price-distance*2;
-  return {entry:price,stop,target,rr:2,stopPct:pct};
+  if (!Number.isFinite(price) || price <= 0 || !atr15 || !Number.isFinite(atr15) || atr15 <= 0) return null;
+  const distance = atr15 * 1.5;
+  const pct = distance / price * 100;
+  if (pct < 0.25 || pct > 3.0) return null;
+  const stop = side === "LONG" ? price - distance : price + distance;
+  const target = side === "LONG" ? price + distance * 3 : price - distance * 3;
+  if (!(stop > 0 && (side === "LONG" ? stop < price && target > price : stop > price && target < price))) return null;
+  const rr = Math.abs(target - price) / Math.abs(price - stop);
+  if (!Number.isFinite(rr) || rr < 2.99 || rr > 3.01) return null;
+  return { entry: price, stop, target, rr: 3, stopPct: pct, riskDistance: distance };
 }
 
 
@@ -91,7 +121,7 @@ async function createPaperTrades(supabase: any, scanId: string) {
     source_candidate_id: c.id, scan_id: c.scan_id, symbol: c.symbol, side: c.side,
     score: c.score, confidence_label: c.confidence_label, entry_price: c.entry_price,
     simulated_account_usd: 200, simulated_risk_usd: 2,
-    simulated_position_usd: Number(c.entry_price)>0 ? Number((2*Number(c.entry_price)/Math.abs(Number(c.entry_price)-Number(c.side==="LONG"?c.stop_loss:c.stop_loss))).toFixed(2)) : null,
+    simulated_position_usd: Number(c.entry_price)>0 ? Number((2*Number(c.entry_price)/Math.abs(Number(c.entry_price)-Number(c.stop_loss))).toFixed(2)) : null,
     stop_loss: c.stop_loss, take_profit: c.take_profit, risk_reward: c.risk_reward,
     signal_created_at: c.created_at, last_checked_at: c.created_at,
   }));
@@ -139,7 +169,7 @@ async function updateOpenPaperTrades(supabase: any) {
             exit_at: new Date(closeTime).toISOString(),
             exit_reason: both ? "BOTH_HIT_SAME_CANDLE" : win ? "TAKE_PROFIT" : "STOP_LOSS",
             realized_r: win ? Number(trade.risk_reward ?? 2) : -1,
-            simulated_pnl_usd: Number(((win ? Number(trade.risk_reward ?? 2) : -1) * 2).toFixed(2)),
+            simulated_pnl_usd: Number(((win ? Number(trade.risk_reward ?? 3) : -1) * Number(trade.simulated_risk_usd ?? 2)).toFixed(2)),
             duration_seconds: Math.max(0, Math.floor((closeTime - new Date(trade.signal_created_at).getTime()) / 1000)),
             last_checked_at: new Date(closeTime).toISOString(), updated_at: new Date().toISOString(),
           };
@@ -177,25 +207,21 @@ Deno.serve(async(req)=>{
     const premiumMap=new Map(premiums.map((p:any)=>[p.symbol,p]));
     const selected=tickers.filter((t:any)=>active.has(t.symbol)&&Number(t.quoteVolume)>1_000_000).sort((a:any,b:any)=>Number(b.quoteVolume)-Number(a.quoteVolume)).slice(0,80);
     const rows:any[]=[],candidates:any[]=[],analyses:any[]=[];
-    // Base market coverage for all 80 symbols; detailed technical and depth analysis for the 20 most liquid.
+    // Base market coverage for all 80 symbols; detailed technical and depth analysis for the 40 most liquid.
     for(let i=0;i<selected.length;i+=16){
       const batch=selected.slice(i,i+16);
       const enriched=await Promise.all(batch.map(async(t:any)=>{
         const p:any=premiumMap.get(t.symbol);
-        const [oiNow,ratioNow]=await Promise.all([
-          optional("/fapi/v1/openInterest?symbol="+t.symbol),
-          optional("/futures/data/globalLongShortAccountRatio?symbol="+t.symbol+"&period=1h&limit=1")
-        ]);
+        const oiNow=await optional("/fapi/v1/openInterest?symbol="+t.symbol);
         const oi=oiNow?Number(oiNow.openInterest):null;
-        const ratio=ratioNow?.[0]?Number(ratioNow[0].longShortRatio):null;
-        return {t,p,oi,ratio};
+        return {t,p,oi,ratio:null};
       }));
       for(const x of enriched){
         const t=x.t,price=Number(t.lastPrice),change=Number(t.priceChangePercent),volume=Number(t.quoteVolume);
         rows.push({scan_id:run.id,symbol:t.symbol,last_price:price,price_change_pct:change,quote_volume:volume,funding_rate:x.p?Number(x.p.lastFundingRate):null,open_interest:x.oi,long_short_ratio:x.ratio});
       }
     }
-    // Detailed requests are intentionally limited to the 20 highest-volume contracts to respect Binance public API rate limits.
+    // Detailed requests are intentionally limited to the 40 highest-volume contracts with bounded concurrency.
     const detailed=selected.slice(0,40);
     for(let i=0;i<detailed.length;i+=8){
       const batch=detailed.slice(i,i+8);
@@ -230,6 +256,10 @@ Deno.serve(async(req)=>{
         const longTaker=takerRatio!==null&&takerRatio>=1.03,shortTaker=takerRatio!==null&&takerRatio<=0.97;
         const oiConfirmed=oiChange!==null&&oiChange>=0.15;
         const oiShortConfirmed=oiChange!==null&&oiChange>=0.15;
+        const spreadConfirmed=!!book&&book.spreadBps!==null&&book.spreadBps<=5;
+        const dataComplete=!!m5&&!!m15&&!!tf["1h"]&&!!tf["4h"]&&!!book&&!!oiHist?.length&&!!taker?.length;
+        const pullbackLong=!!m15&&m15.close!==null&&m15.ema20!==null&&m15.atr14!==null&&m15.close>=m15.ema20&&Math.abs(m15.close-m15.ema20)<=m15.atr14*1.25;
+        const pullbackShort=!!m15&&m15.close!==null&&m15.ema20!==null&&m15.atr14!==null&&m15.close<=m15.ema20&&Math.abs(m15.close-m15.ema20)<=m15.atr14*1.25;
         const price=Number(t.lastPrice),atr15=m15?.atr14??null;
         let side="WATCH",reasons:string[]=[],score=0,setup:any=null;
         if(alignment==="BULLISH"){score+=35;reasons.push("4h/1h/15m bullish alignment");}
@@ -241,7 +271,7 @@ Deno.serve(async(req)=>{
         if(Number(t.quoteVolume)>=10_000_000){score+=5;reasons.push("High liquidity");}
         if(alignment==="BULLISH"&&momentumLong&&longBook&&longTaker&&oiConfirmed){setup=riskSetup("LONG",price,atr15);if(setup){side="LONG";score+=10;reasons.push("Risk model: 2R target and ATR stop validated");}}
         if(alignment==="BEARISH"&&momentumShort&&shortBook&&shortTaker&&oiShortConfirmed){setup=riskSetup("SHORT",price,atr15);if(setup){side="SHORT";score+=10;reasons.push("Risk model: 2R target and ATR stop validated");}}
-        const quality=Object.keys(tf).length===4&&!!book&&!!oiHist&&!!taker?"complete":"partial";
+        const quality=dataComplete?"complete":"partial";
         const analysis={scan_id:run.id,symbol, timeframe_data:tf,orderbook_imbalance:book?.imbalance??null,orderbook_bid_usd:book?.bidUsd??null,orderbook_ask_usd:book?.askUsd??null,spread_bps:book?.spreadBps??null,open_interest_usd:oiNew,open_interest_change_pct:oiChange,taker_buy_sell_ratio:takerRatio,liquidation_buy_usd:null,liquidation_sell_usd:null,liquidation_source:"live_public_websocket_in_dashboard_only",data_quality:quality,trend_alignment:alignment,signal_side:side,signal_score:score,risk_reward:setup?.rr??null,entry_price:setup?.entry??null,stop_loss:setup?.stop??null,take_profit:setup?.target??null,reasons};
         return {analysis,candidate:{scan_id:run.id,symbol,side,score,entry_price:setup?.entry??price,take_profit:setup?.target??null,stop_loss:setup?.stop??null,reasons,risk_reward:setup?.rr??null,confidence_label:score>=85?"HIGH":score>=70?"MEDIUM":"LOW",validation_status:side==="WATCH"?"WATCH_ONLY":"RISK_CHECKED_NOT_EXECUTED"}};
       }));
