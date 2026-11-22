@@ -135,7 +135,7 @@ async function updateOpenPaperTrades(supabase: any) {
     const list = bySymbol.get(trade.symbol) ?? [];
     list.push(trade); bySymbol.set(trade.symbol, list);
   }
-  let checked = 0, completed = 0;
+  let checked = 0, completed = 0, updateFailed = 0;
   const now = Date.now();
   for (const [symbol, group] of bySymbol) {
     const earliest = Math.min(...group.map((t: any) => new Date(t.last_checked_at).getTime()));
@@ -171,11 +171,11 @@ async function updateOpenPaperTrades(supabase: any) {
       const lastCandle = relevant[relevant.length - 1];
       const patch = outcome ?? { last_checked_at: new Date(Number(lastCandle[6])).toISOString(), updated_at: new Date().toISOString() };
       const { error: updateError } = await supabase.from("paper_trades").update(patch).eq("id", trade.id).eq("status", "OPEN");
-      if (updateError) throw updateError;
+      if (updateError) { updateFailed++; console.warn("Paper-trade update deferred; it will be retried next scan", trade.id, updateError.message); continue; }
       checked++; if (outcome) completed++;
     }
   }
-  return { checked, completed };
+  return { checked, completed, update_failed: updateFailed };
 }
 
 Deno.serve(async(req)=>{
@@ -292,7 +292,7 @@ Deno.serve(async(req)=>{
     if(snapRes.error)throw snapRes.error;if(candRes.error)throw candRes.error;if(analysisRes.error)throw analysisRes.error;
     const paperTradesCreated = await createPaperTrades(supabase, run.id);
     await supabase.from("scan_runs").update({status:"completed",completed_at:new Date().toISOString(),symbols_scanned:rows.length}).eq("id",run.id);
-    return json({ok:true,scan_id:run.id,symbols_scanned:rows.length,detailed_analyses:analyses.length,validated_setups:candidates.filter(x=>x.side!=="WATCH").length,paper_trades_created:paperTradesCreated,paper_trades_checked:paperTradeUpdates.checked,paper_trades_completed:paperTradeUpdates.completed,liquidations:"Not stored by the scanner; public all-market WebSocket is shown live in dashboard while open.",note:"Paper trades are tracked from generated LONG/SHORT signals only. WATCH rows are excluded. A 1m candle touching both TP and SL is conservatively counted as a LOSS. No real orders are placed."});
+    return json({ok:true,scan_id:run.id,symbols_scanned:rows.length,detailed_analyses:analyses.length,validated_setups:candidates.filter(x=>x.side!=="WATCH").length,paper_trades_created:paperTradesCreated,paper_trades_checked:paperTradeUpdates.checked,paper_trades_completed:paperTradeUpdates.completed,paper_trade_updates_deferred:paperTradeUpdates.update_failed,liquidations:"Not stored by the scanner; public all-market WebSocket is shown live in dashboard while open.",note:"Paper trades are tracked from generated LONG/SHORT signals only. WATCH rows are excluded. A 1m candle touching both TP and SL is conservatively counted as a LOSS. No real orders are placed."});
   }catch(error){
     const message=error instanceof Error?error.message:JSON.stringify(error);
     await supabase.from("scan_runs").update({status:"failed",completed_at:new Date().toISOString(),error_message:message}).eq("id",run.id);
