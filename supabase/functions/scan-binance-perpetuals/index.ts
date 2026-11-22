@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.0";
+import { riskSetup } from "./risk-model.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -88,18 +89,7 @@ function orderbook(depth:any) {
   const bestBid=Number(depth.bids[0][0]),bestAsk=Number(depth.asks[0][0]),mid=(bestBid+bestAsk)/2;
   return {bidUsd:bid,askUsd:ask,imbalance:(bid-ask)/(bid+ask),spreadBps:mid>0?(bestAsk-bestBid)/mid*10000:null};
 }
-function riskSetup(side:string,price:number,atr15:number|null) {
-  if (!Number.isFinite(price) || price <= 0 || !atr15 || !Number.isFinite(atr15) || atr15 <= 0) return null;
-  const distance = atr15 * 1.5;
-  const pct = distance / price * 100;
-  if (pct < 0.25 || pct > 3.0) return null;
-  const stop = side === "LONG" ? price - distance : price + distance;
-  const target = side === "LONG" ? price + distance * 3 : price - distance * 3;
-  if (!(stop > 0 && (side === "LONG" ? stop < price && target > price : stop > price && target < price))) return null;
-  const rr = Math.abs(target - price) / Math.abs(price - stop);
-  if (!Number.isFinite(rr) || rr < 2.99 || rr > 3.01) return null;
-  return { entry: price, stop, target, rr: 3, stopPct: pct, riskDistance: distance };
-}
+
 
 
 // Paper-trade tracking only: this records and evaluates signals; it never places orders.
