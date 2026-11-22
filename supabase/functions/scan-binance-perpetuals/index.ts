@@ -185,6 +185,10 @@ Deno.serve(async(req)=>{
   if(!url||!key)return json({error:"Server configuration missing"},500);
   const supabase=createClient(url,key,{auth:{persistSession:false}});
   const cutoff=new Date(Date.now()-120000).toISOString();
+  const { error: staleRunError } = await supabase.from("scan_runs")
+    .update({ status: "failed", completed_at: new Date().toISOString(), error_message: "Scanner run exceeded the 2-minute lease and was marked stale." })
+    .eq("status", "running").lt("started_at", cutoff);
+  if (staleRunError) return json({ error: "Could not recover stale scanner runs", detail: staleRunError.message }, 500);
   const {data:activeRun}=await supabase.from("scan_runs").select("id").eq("status","running").gte("started_at",cutoff).limit(1).maybeSingle();
   if(activeRun)return json({ok:true,skipped:true,reason:"Previous V1 scan is still running",active_scan_id:activeRun.id},202);
   const {data:run,error:runErr}=await supabase.from("scan_runs").insert({status:"running"}).select("id").single();
