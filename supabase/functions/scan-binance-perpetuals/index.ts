@@ -115,7 +115,9 @@ async function createPaperTrades(supabase: any, scanId: string) {
   if (!candidates?.length) return 0;
   const records = candidates.filter((c: any) => {
     const entry = Number(c.entry_price), stop = Number(c.stop_loss), target = Number(c.take_profit);
-    return Number.isFinite(entry) && entry > 0 && Number.isFinite(stop) && Number.isFinite(target)
+    const rr = Math.abs(target - entry) / Math.abs(entry - stop);
+    return Number.isFinite(entry) && entry > 0 && Number.isFinite(stop) && stop > 0
+      && Number.isFinite(target) && Number.isFinite(rr) && Math.abs(rr - 3) <= 0.01
       && (c.side === "LONG" ? stop < entry && target > entry : stop > entry && target < entry);
   }).map((c: any) => ({
     source_candidate_id: c.id, scan_id: c.scan_id, symbol: c.symbol, side: c.side,
