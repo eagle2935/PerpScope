@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.0";
+import { riskSetup } from "./risk-model.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -50,11 +51,37 @@ function indicators(raw: any[]) {
   return {close:last,ema20:e20,ema50:e50,rsi14:rsi(closes),macd:macdLine,macd_signal:signal,macd_histogram:hist,atr14:atr(closed),trend,candles:closed.length};
 }
 async function get(path:string) {
-  const res=await fetch(BASE+path,{headers:{Accept:"application/json"}});
-  if(!res.ok)throw new Error("Binance "+res.status+" "+path);
-  return await res.json();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(BASE + path, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (res.status === 429 || res.status >= 500) {
+        const retryAfter = Number(res.headers.get("Retry-After") || 0);
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, Math.min(2500, retryAfter * 1000 || 250 * (2 ** attempt))));
+          continue;
+        }
+      }
+      if (!res.ok) throw new Error("Binance " + res.status + " " + path);
+      return await res.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 200 * (2 ** attempt)));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Binance request failed: " + path);
 }
-async function optional(path:string) { try{return await get(path);}catch{return null;} }
+async function optional(path:string) {
+  try { return await get(path); }
+  catch (error) { console.warn("Optional Binance data unavailable", path, error); return null; }
+}
 function orderbook(depth:any) {
   if(!depth?.bids?.length||!depth?.asks?.length)return null;
   const bid=depth.bids.reduce((s:any,x:any)=>s+Number(x[0])*Number(x[1]),0);
@@ -62,14 +89,7 @@ function orderbook(depth:any) {
   const bestBid=Number(depth.bids[0][0]),bestAsk=Number(depth.asks[0][0]),mid=(bestBid+bestAsk)/2;
   return {bidUsd:bid,askUsd:ask,imbalance:(bid-ask)/(bid+ask),spreadBps:mid>0?(bestAsk-bestBid)/mid*10000:null};
 }
-function riskSetup(side:string,price:number,atr15:number|null) {
-  if(!atr15||atr15<=0)return null;
-  const distance=atr15*1.5, pct=distance/price*100;
-  if(pct<0.25||pct>3.0)return null;
-  const stop=side==="LONG"?price-distance:price+distance;
-  const target=side==="LONG"?price+distance*2:price-distance*2;
-  return {entry:price,stop,target,rr:2,stopPct:pct};
-}
+
 
 
 // Paper-trade tracking only: this records and evaluates signals; it never places orders.
@@ -85,13 +105,15 @@ async function createPaperTrades(supabase: any, scanId: string) {
   if (!candidates?.length) return 0;
   const records = candidates.filter((c: any) => {
     const entry = Number(c.entry_price), stop = Number(c.stop_loss), target = Number(c.take_profit);
-    return Number.isFinite(entry) && entry > 0 && Number.isFinite(stop) && Number.isFinite(target)
+    const rr = Math.abs(target - entry) / Math.abs(entry - stop);
+    return Number.isFinite(entry) && entry > 0 && Number.isFinite(stop) && stop > 0
+      && Number.isFinite(target) && Number.isFinite(rr) && Math.abs(rr - 2) <= 0.01
       && (c.side === "LONG" ? stop < entry && target > entry : stop > entry && target < entry);
   }).map((c: any) => ({
     source_candidate_id: c.id, scan_id: c.scan_id, symbol: c.symbol, side: c.side,
     score: c.score, confidence_label: c.confidence_label, entry_price: c.entry_price,
     simulated_account_usd: 200, simulated_risk_usd: 2,
-    simulated_position_usd: Number(c.entry_price)>0 ? Number((2*Number(c.entry_price)/Math.abs(Number(c.entry_price)-Number(c.side==="LONG"?c.stop_loss:c.stop_loss))).toFixed(2)) : null,
+    simulated_position_usd: Number(c.entry_price)>0 ? Number((2*Number(c.entry_price)/Math.abs(Number(c.entry_price)-Number(c.stop_loss))).toFixed(2)) : null,
     stop_loss: c.stop_loss, take_profit: c.take_profit, risk_reward: c.risk_reward,
     signal_created_at: c.created_at, last_checked_at: c.created_at,
   }));
@@ -113,7 +135,7 @@ async function updateOpenPaperTrades(supabase: any) {
     const list = bySymbol.get(trade.symbol) ?? [];
     list.push(trade); bySymbol.set(trade.symbol, list);
   }
-  let checked = 0, completed = 0;
+  let checked = 0, completed = 0, updateFailed = 0;
   const now = Date.now();
   for (const [symbol, group] of bySymbol) {
     const earliest = Math.min(...group.map((t: any) => new Date(t.last_checked_at).getTime()));
@@ -139,7 +161,7 @@ async function updateOpenPaperTrades(supabase: any) {
             exit_at: new Date(closeTime).toISOString(),
             exit_reason: both ? "BOTH_HIT_SAME_CANDLE" : win ? "TAKE_PROFIT" : "STOP_LOSS",
             realized_r: win ? Number(trade.risk_reward ?? 2) : -1,
-            simulated_pnl_usd: Number(((win ? Number(trade.risk_reward ?? 2) : -1) * 2).toFixed(2)),
+            simulated_pnl_usd: Number(((win ? Number(trade.risk_reward ?? 2) : -1) * Number(trade.simulated_risk_usd ?? 2)).toFixed(2)),
             duration_seconds: Math.max(0, Math.floor((closeTime - new Date(trade.signal_created_at).getTime()) / 1000)),
             last_checked_at: new Date(closeTime).toISOString(), updated_at: new Date().toISOString(),
           };
@@ -149,11 +171,11 @@ async function updateOpenPaperTrades(supabase: any) {
       const lastCandle = relevant[relevant.length - 1];
       const patch = outcome ?? { last_checked_at: new Date(Number(lastCandle[6])).toISOString(), updated_at: new Date().toISOString() };
       const { error: updateError } = await supabase.from("paper_trades").update(patch).eq("id", trade.id).eq("status", "OPEN");
-      if (updateError) throw updateError;
+      if (updateError) { updateFailed++; console.warn("Paper-trade update deferred; it will be retried next scan", trade.id, updateError.message); continue; }
       checked++; if (outcome) completed++;
     }
   }
-  return { checked, completed };
+  return { checked, completed, update_failed: updateFailed };
 }
 
 Deno.serve(async(req)=>{
@@ -163,6 +185,10 @@ Deno.serve(async(req)=>{
   if(!url||!key)return json({error:"Server configuration missing"},500);
   const supabase=createClient(url,key,{auth:{persistSession:false}});
   const cutoff=new Date(Date.now()-120000).toISOString();
+  const { error: staleRunError } = await supabase.from("scan_runs")
+    .update({ status: "failed", completed_at: new Date().toISOString(), error_message: "Scanner run exceeded the 2-minute lease and was marked stale." })
+    .eq("status", "running").lt("started_at", cutoff);
+  if (staleRunError) return json({ error: "Could not recover stale scanner runs", detail: staleRunError.message }, 500);
   const {data:activeRun}=await supabase.from("scan_runs").select("id").eq("status","running").gte("started_at",cutoff).limit(1).maybeSingle();
   if(activeRun)return json({ok:true,skipped:true,reason:"Previous V1 scan is still running",active_scan_id:activeRun.id},202);
   const {data:run,error:runErr}=await supabase.from("scan_runs").insert({status:"running"}).select("id").single();
@@ -182,23 +208,19 @@ Deno.serve(async(req)=>{
       const batch=selected.slice(i,i+16);
       const enriched=await Promise.all(batch.map(async(t:any)=>{
         const p:any=premiumMap.get(t.symbol);
-        const [oiNow,ratioNow]=await Promise.all([
-          optional("/fapi/v1/openInterest?symbol="+t.symbol),
-          optional("/futures/data/globalLongShortAccountRatio?symbol="+t.symbol+"&period=1h&limit=1")
-        ]);
+        const oiNow=selected.indexOf(t)<20 ? await optional("/fapi/v1/openInterest?symbol="+t.symbol) : null;
         const oi=oiNow?Number(oiNow.openInterest):null;
-        const ratio=ratioNow?.[0]?Number(ratioNow[0].longShortRatio):null;
-        return {t,p,oi,ratio};
+        return {t,p,oi,ratio:null};
       }));
       for(const x of enriched){
         const t=x.t,price=Number(t.lastPrice),change=Number(t.priceChangePercent),volume=Number(t.quoteVolume);
         rows.push({scan_id:run.id,symbol:t.symbol,last_price:price,price_change_pct:change,quote_volume:volume,funding_rate:x.p?Number(x.p.lastFundingRate):null,open_interest:x.oi,long_short_ratio:x.ratio});
       }
     }
-    // Detailed requests are intentionally limited to the 20 highest-volume contracts to respect Binance public API rate limits.
-    const detailed=selected.slice(0,40);
-    for(let i=0;i<detailed.length;i+=8){
-      const batch=detailed.slice(i,i+8);
+    // Detailed requests are intentionally limited to the 40 highest-volume contracts with bounded concurrency.
+    const detailed=selected.slice(0,20);
+    for(let i=0;i<detailed.length;i+=10){
+      const batch=detailed.slice(i,i+10);
       const result=await Promise.all(batch.map(async(t:any)=>{
         const symbol=t.symbol;
         const paths=[
@@ -230,6 +252,10 @@ Deno.serve(async(req)=>{
         const longTaker=takerRatio!==null&&takerRatio>=1.03,shortTaker=takerRatio!==null&&takerRatio<=0.97;
         const oiConfirmed=oiChange!==null&&oiChange>=0.15;
         const oiShortConfirmed=oiChange!==null&&oiChange>=0.15;
+        const spreadConfirmed=!!book&&book.spreadBps!==null&&book.spreadBps<=5;
+        const dataComplete=!!m5&&!!m15&&!!tf["1h"]&&!!tf["4h"]&&!!book&&!!oiHist?.length&&!!taker?.length;
+        const pullbackLong=!!m15&&m15.close!==null&&m15.ema20!==null&&m15.atr14!==null&&m15.close>=m15.ema20&&Math.abs(m15.close-m15.ema20)<=m15.atr14*1.25;
+        const pullbackShort=!!m15&&m15.close!==null&&m15.ema20!==null&&m15.atr14!==null&&m15.close<=m15.ema20&&Math.abs(m15.close-m15.ema20)<=m15.atr14*1.25;
         const price=Number(t.lastPrice),atr15=m15?.atr14??null;
         let side="WATCH",reasons:string[]=[],score=0,setup:any=null;
         if(alignment==="BULLISH"){score+=35;reasons.push("4h/1h/15m bullish alignment");}
@@ -239,9 +265,17 @@ Deno.serve(async(req)=>{
         if((alignment==="BULLISH"&&longTaker)||(alignment==="BEARISH"&&shortTaker)){score+=10;reasons.push("Taker flow confirms direction");}
         if(oiConfirmed){score+=10;reasons.push("Open interest increasing");}
         if(Number(t.quoteVolume)>=10_000_000){score+=5;reasons.push("High liquidity");}
-        if(alignment==="BULLISH"&&momentumLong&&longBook&&longTaker&&oiConfirmed){setup=riskSetup("LONG",price,atr15);if(setup){side="LONG";score+=10;reasons.push("Risk model: 2R target and ATR stop validated");}}
-        if(alignment==="BEARISH"&&momentumShort&&shortBook&&shortTaker&&oiShortConfirmed){setup=riskSetup("SHORT",price,atr15);if(setup){side="SHORT";score+=10;reasons.push("Risk model: 2R target and ATR stop validated");}}
-        const quality=Object.keys(tf).length===4&&!!book&&!!oiHist&&!!taker?"complete":"partial";
+        if (alignment==="BULLISH" && momentumLong && pullbackLong && longBook && longTaker && oiConfirmed && spreadConfirmed && dataComplete) {
+          setup = riskSetup("LONG", price, atr15);
+          if (setup) { side="LONG"; score+=10; reasons.push("15m pullback, liquidity and baseline 1:2 risk model validated"); }
+        }
+        if (alignment==="BEARISH" && momentumShort && pullbackShort && shortBook && shortTaker && oiShortConfirmed && spreadConfirmed && dataComplete) {
+          setup = riskSetup("SHORT", price, atr15);
+          if (setup) { side="SHORT"; score+=10; reasons.push("15m pullback, liquidity and baseline 1:2 risk model validated"); }
+        }
+        if (!dataComplete) reasons.push("Required market data incomplete");
+        if (!spreadConfirmed) reasons.push("Spread filter failed or unavailable");
+        const quality=dataComplete?"complete":"partial";
         const analysis={scan_id:run.id,symbol, timeframe_data:tf,orderbook_imbalance:book?.imbalance??null,orderbook_bid_usd:book?.bidUsd??null,orderbook_ask_usd:book?.askUsd??null,spread_bps:book?.spreadBps??null,open_interest_usd:oiNew,open_interest_change_pct:oiChange,taker_buy_sell_ratio:takerRatio,liquidation_buy_usd:null,liquidation_sell_usd:null,liquidation_source:"live_public_websocket_in_dashboard_only",data_quality:quality,trend_alignment:alignment,signal_side:side,signal_score:score,risk_reward:setup?.rr??null,entry_price:setup?.entry??null,stop_loss:setup?.stop??null,take_profit:setup?.target??null,reasons};
         return {analysis,candidate:{scan_id:run.id,symbol,side,score,entry_price:setup?.entry??price,take_profit:setup?.target??null,stop_loss:setup?.stop??null,reasons,risk_reward:setup?.rr??null,confidence_label:score>=85?"HIGH":score>=70?"MEDIUM":"LOW",validation_status:side==="WATCH"?"WATCH_ONLY":"RISK_CHECKED_NOT_EXECUTED"}};
       }));
@@ -258,7 +292,7 @@ Deno.serve(async(req)=>{
     if(snapRes.error)throw snapRes.error;if(candRes.error)throw candRes.error;if(analysisRes.error)throw analysisRes.error;
     const paperTradesCreated = await createPaperTrades(supabase, run.id);
     await supabase.from("scan_runs").update({status:"completed",completed_at:new Date().toISOString(),symbols_scanned:rows.length}).eq("id",run.id);
-    return json({ok:true,scan_id:run.id,symbols_scanned:rows.length,detailed_analyses:analyses.length,validated_setups:candidates.filter(x=>x.side!=="WATCH").length,paper_trades_created:paperTradesCreated,paper_trades_checked:paperTradeUpdates.checked,paper_trades_completed:paperTradeUpdates.completed,liquidations:"Not stored by the scanner; public all-market WebSocket is shown live in dashboard while open.",note:"Paper trades are tracked from generated LONG/SHORT signals only. WATCH rows are excluded. A 1m candle touching both TP and SL is conservatively counted as a LOSS. No real orders are placed."});
+    return json({ok:true,scan_id:run.id,symbols_scanned:rows.length,detailed_analyses:analyses.length,validated_setups:candidates.filter(x=>x.side!=="WATCH").length,paper_trades_created:paperTradesCreated,paper_trades_checked:paperTradeUpdates.checked,paper_trades_completed:paperTradeUpdates.completed,paper_trade_updates_deferred:paperTradeUpdates.update_failed,liquidations:"Not stored by the scanner; public all-market WebSocket is shown live in dashboard while open.",note:"Paper trades are tracked from generated LONG/SHORT signals only. WATCH rows are excluded. A 1m candle touching both TP and SL is conservatively counted as a LOSS. No real orders are placed."});
   }catch(error){
     const message=error instanceof Error?error.message:JSON.stringify(error);
     await supabase.from("scan_runs").update({status:"failed",completed_at:new Date().toISOString(),error_message:message}).eq("id",run.id);
