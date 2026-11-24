@@ -422,5 +422,30 @@ $$;
 
 revoke all on function private.evaluate_v1_filter_experiment(text,text,numeric,numeric,numeric,boolean)
   from public, anon, authenticated;
+grant usage on schema private to service_role;
 grant execute on function private.evaluate_v1_filter_experiment(text,text,numeric,numeric,numeric,boolean)
+  to service_role;
+
+-- Public-schema wrapper is callable only with the server-side service_role key.
+-- Never put that key in the browser.
+create or replace function public.run_v1_filter_experiment(
+  p_experiment_name text,
+  p_hypothesis text,
+  p_max_spread_bps numeric default 2.0,
+  p_min_oi_change_pct numeric default 0.1,
+  p_min_orderbook_abs numeric default 0.0,
+  p_require_taker_confirmation boolean default false
+) returns uuid
+language sql
+security invoker
+set search_path = pg_catalog, public, private
+as $
+  select private.evaluate_v1_filter_experiment(
+    p_experiment_name,p_hypothesis,p_max_spread_bps,
+    p_min_oi_change_pct,p_min_orderbook_abs,p_require_taker_confirmation
+  );
+$;
+revoke all on function public.run_v1_filter_experiment(text,text,numeric,numeric,numeric,boolean)
+  from public, anon, authenticated;
+grant execute on function public.run_v1_filter_experiment(text,text,numeric,numeric,numeric,boolean)
   to service_role;
