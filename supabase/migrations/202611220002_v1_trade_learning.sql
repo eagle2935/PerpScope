@@ -1,3 +1,5 @@
+create schema if not exists private;
+
 -- PerpScope V1 controlled feedback engine.
 -- Entry features are frozen at signal creation; outcomes are attached at close.
 -- This migration does not change scanner entry/exit rules or enable real orders.
